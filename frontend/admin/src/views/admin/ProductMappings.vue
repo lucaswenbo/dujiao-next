@@ -68,6 +68,7 @@ interface UpstreamProduct {
   currency?: string
   is_active: boolean
   category_id?: number
+  tags?: string[]
   skus?: UpstreamSku[]
 }
 
@@ -88,6 +89,40 @@ const importConnectionId = ref('')
 const importCategoryId = ref('__none__')
 const upstreamProducts = ref<UpstreamProduct[]>([])
 const mappedUpstreamIds = ref<Set<number>>(new Set())
+const onlyUnimported = ref(false)
+const upstreamSearch = ref('')
+const upstreamSort = ref('default')
+const upstreamSortOptions = ['default', 'nameAsc', 'nameDesc', 'priceAsc', 'priceDesc', 'idAsc', 'idDesc']
+const visibleUpstreamProducts = computed(() => {
+  const query = upstreamSearch.value.trim().toLocaleLowerCase()
+  const products = upstreamProducts.value.filter(product => {
+    if (onlyUnimported.value && mappedUpstreamIds.value.has(product.id)) return false
+    if (!query) return true
+    return [String(product.id), ...Object.values(product.title || {}), ...(product.tags || []),
+      ...(product.skus || []).map(sku => sku.sku_code || '')]
+      .some(value => String(value ?? '').toLocaleLowerCase().includes(query))
+  })
+  const price = (product: UpstreamProduct) => {
+    const prices = (product.skus || []).map(sku => Number(sku.price_amount)).filter(Number.isFinite)
+    return prices.length ? Math.min(...prices) : Number(product.price_amount) || 0
+  }
+  if (upstreamSort.value !== 'default') products.sort((a, b) => {
+    let difference = 0
+    switch (upstreamSort.value) {
+      case 'nameAsc': case 'nameDesc':
+        difference = getLocalizedText(a.title).localeCompare(getLocalizedText(b.title), undefined, { numeric: true })
+        break
+      case 'priceAsc': case 'priceDesc': difference = price(a) - price(b); break
+      default: difference = a.id - b.id
+    }
+    return (upstreamSort.value.endsWith('Desc') ? -difference : difference) || a.id - b.id
+  })
+  return products
+})
+let upstreamRequestVersion = 0
+const isCurrentUpstreamRequest = (version: number, connectionId: string) =>
+  version === upstreamRequestVersion && showImportModal.value && connectionId === importConnectionId.value
+const upstreamLoadError = ref('')
 const loadingUpstream = ref(false)
 const loadingMoreUpstream = ref(false)
 const upstreamPage = ref(1)
@@ -367,7 +402,7 @@ const handleDelete = async (mapping: AdminProductMapping) => {
 
 // --- Import dialog ---
 
-const selectableProducts = computed(() => upstreamProducts.value.filter((p) => !mappedUpstreamIds.value.has(p.id)))
+const selectableProducts = computed(() => visibleUpstreamProducts.value.filter((p) => !mappedUpstreamIds.value.has(p.id)))
 
 const allSelected = computed(() => {
   if (selectableProducts.value.length === 0) return false
@@ -376,8 +411,8 @@ const allSelected = computed(() => {
 
 const toggleSelectAll = () => {
   selectedProductIds.value = allSelected.value
-    ? new Set()
-    : new Set(selectableProducts.value.map((p) => p.id))
+    ? new Set([...selectedProductIds.value].filter(id => !selectableProducts.value.some(p => p.id === id)))
+    : new Set([...selectedProductIds.value, ...selectableProducts.value.map((p) => p.id)])
 }
 
 const toggleProduct = (id: number) => {
@@ -426,6 +461,9 @@ const getSkuStockClass = (product: UpstreamProduct) => {
 const openImportModal = () => {
   importConnectionId.value = ''
   importCategoryId.value = '__none__'
+  onlyUnimported.value = false
+  upstreamSearch.value = ''
+  upstreamSort.value = 'default'
   upstreamProducts.value = []
   upstreamTotal.value = 0
   upstreamPage.value = 1
@@ -437,9 +475,15 @@ const openImportModal = () => {
   showImportModal.value = true
 }
 
-const closeImportModal = () => { showImportModal.value = false }
+const closeImportModal = () => { upstreamRequestVersion++; showImportModal.value = false }
 
 const hasMoreUpstream = computed(() => upstreamProducts.value.length < upstreamTotal.value)
+
+const upstreamEmptyMessage = computed(() => upstreamSearch.value.trim()
+  ? t(hasMoreUpstream.value ? 'productMappings.import.noSearchResultsLoaded' : 'productMappings.import.noSearchResults')
+  : onlyUnimported.value
+  ? t(hasMoreUpstream.value ? 'productMappings.import.noUnimportedLoaded' : 'productMappings.import.noUnimportedProducts')
+  : t('productMappings.import.noUpstreamProducts'))
 
 const parseUpstreamResult = (res: any): { items: UpstreamProduct[]; total: number; mappedIds?: number[] } => {
   const data = res.data.data
@@ -448,36 +492,73 @@ const parseUpstreamResult = (res: any): { items: UpstreamProduct[]; total: numbe
 }
 
 const fetchUpstreamProducts = async (connectionId: string) => {
-  if (!connectionId) { upstreamProducts.value = []; upstreamTotal.value = 0; mappedUpstreamIds.value = new Set(); return }
-  loadingUpstream.value = true
+  const version = ++upstreamRequestVersion
+  upstreamLoadError.value = ''
+  upstreamProducts.value = []
+  upstreamTotal.value = 0
+  mappedUpstreamIds.value = new Set()
+  loadingMoreUpstream.value = false
+  loadingUpstream.value = Boolean(connectionId)
   upstreamPage.value = 1
+  if (!connectionId) return
   try {
     const res = await adminAPI.getUpstreamProducts({ connection_id: connectionId, page: 1, page_size: upstreamPageSize })
+    if (!isCurrentUpstreamRequest(version, connectionId)) return
     const { items, total, mappedIds } = parseUpstreamResult(res)
     upstreamProducts.value = items
     upstreamTotal.value = total
     if (mappedIds) mappedUpstreamIds.value = new Set(mappedIds)
-  } catch { upstreamProducts.value = []; upstreamTotal.value = 0; mappedUpstreamIds.value = new Set() } finally { loadingUpstream.value = false }
+  } catch (err) {
+    if (!isCurrentUpstreamRequest(version, connectionId)) return
+    upstreamLoadError.value = err instanceof Error ? err.message : t('common.api.requestFailed')
+  } finally { if (isCurrentUpstreamRequest(version, connectionId)) loadingUpstream.value = false }
 }
 
-const loadMoreUpstreamProducts = async () => {
-  if (!importConnectionId.value || loadingMoreUpstream.value || !hasMoreUpstream.value) return
+const loadMoreUpstreamProducts = async (automatic = false) => {
+  if (!importConnectionId.value || loadingUpstream.value || loadingMoreUpstream.value || !hasMoreUpstream.value) return
+  const connectionId = importConnectionId.value
+  const version = upstreamRequestVersion
   loadingMoreUpstream.value = true
+  let receivedProducts = false
   try {
     const nextPage = upstreamPage.value + 1
-    const res = await adminAPI.getUpstreamProducts({ connection_id: importConnectionId.value, page: nextPage, page_size: upstreamPageSize })
+    const res = await adminAPI.getUpstreamProducts({ connection_id: connectionId, page: nextPage, page_size: upstreamPageSize })
+    if (!isCurrentUpstreamRequest(version, connectionId)) return
     const { items, total } = parseUpstreamResult(res)
+    receivedProducts = items.length > 0
     upstreamProducts.value.push(...items)
     upstreamTotal.value = total
     upstreamPage.value = nextPage
-  } catch { /* ignore */ } finally { loadingMoreUpstream.value = false }
+  } catch { /* API client reports request errors. */ }
+  finally { if (isCurrentUpstreamRequest(version, connectionId)) loadingMoreUpstream.value = false }
+  if (!automatic && receivedProducts && isCurrentUpstreamRequest(version, connectionId)) {
+    await completeUpstreamCatalog()
+  }
 }
 
+// Upstream protocols do not all support search/sort parameters. Fetch remaining
+// pages sequentially so these controls cover the entire catalog.
+const completeUpstreamCatalog = async () => {
+  const version = upstreamRequestVersion
+  const connectionId = importConnectionId.value
+  while (isCurrentUpstreamRequest(version, connectionId)
+    && (upstreamSearch.value.trim() || upstreamSort.value !== 'default')
+    && hasMoreUpstream.value && !loadingUpstream.value && !loadingMoreUpstream.value) {
+    const previousPage = upstreamPage.value
+    const previousCount = upstreamProducts.value.length
+    await loadMoreUpstreamProducts(true)
+    if (upstreamPage.value === previousPage || upstreamProducts.value.length === previousCount) break
+  }
+}
+watch([upstreamSearch, upstreamSort, loadingUpstream], () => { void completeUpstreamCatalog() })
+
 const fetchUpstreamCategories = async (connectionId: string) => {
+  const version = upstreamRequestVersion
   if (!connectionId) { upstreamCategories.value = []; upstreamCategoriesSupported.value = false; return }
   loadingUpstreamCategories.value = true
   try {
     const res = await adminAPI.getUpstreamCategories({ connection_id: connectionId })
+    if (!isCurrentUpstreamRequest(version, connectionId)) return
     const data = res.data.data as { supported?: boolean; categories?: UpstreamCategory[] } | null
     upstreamCategories.value = data?.categories || []
     upstreamCategoriesSupported.value = data?.supported ?? false
@@ -485,10 +566,11 @@ const fetchUpstreamCategories = async (connectionId: string) => {
     if (!upstreamCategoriesSupported.value) importViewMode.value = 'flat'
     else importViewMode.value = 'category'
   } catch {
+    if (!isCurrentUpstreamRequest(version, connectionId)) return
     upstreamCategories.value = []
     upstreamCategoriesSupported.value = false
     importViewMode.value = 'flat'
-  } finally { loadingUpstreamCategories.value = false }
+  } finally { if (isCurrentUpstreamRequest(version, connectionId)) loadingUpstreamCategories.value = false }
 }
 
 // 拉取分类下的真实商品数量（后端遍历全部上游分页统计），避免商品数量较多时
@@ -515,7 +597,7 @@ const fetchUpstreamCategoryCounts = async (connectionId: string) => {
 // Group upstream products by category_id
 const productsByCategory = computed(() => {
   const map = new Map<number, UpstreamProduct[]>()
-  for (const p of upstreamProducts.value) {
+  for (const p of visibleUpstreamProducts.value) {
     const catId = p.category_id || 0
     if (!map.has(catId)) map.set(catId, [])
     map.get(catId)!.push(p)
@@ -530,7 +612,7 @@ const productsByCategory = computed(() => {
 const categoryDisplayList = computed(() => {
   // Build parent map for breadcrumb
   const catMap = new Map(upstreamCategories.value.map(c => [c.id, c]))
-  const counts = categoryProductCounts.value
+  const counts = onlyUnimported.value || upstreamSearch.value.trim() ? null : categoryProductCounts.value
   const countOf = (catId: number) => counts ? (counts.get(catId) || 0) : (productsByCategory.value.get(catId) || []).length
 
   const result: { category: UpstreamCategory; productCount: number; path: string; nonMappedCount: number; fullyLoaded: boolean }[] = []
@@ -597,7 +679,7 @@ const isCategoryAllSelected = (catId: number) => {
 }
 
 const handleImportCategory = async (catId: number) => {
-  if (!importConnectionId.value) return
+  if (!importConnectionId.value || upstreamSearch.value.trim()) return
   // Validate: must have autoCreateCategory or a selected local category
   const localCatId = importCategoryId.value !== '__none__' ? Number(importCategoryId.value) : 0
   if (!autoCreateCategory.value && localCatId === 0) {
@@ -631,6 +713,7 @@ const handleImportCategory = async (catId: number) => {
 }
 
 watch(importConnectionId, (value) => {
+  upstreamRequestVersion++
   selectedProductIds.value = new Set()
   importExpandedIds.value = new Set()
   expandedCategoryIds.value = new Set()
@@ -987,7 +1070,7 @@ onMounted(() => { fetchConnections(); fetchCategories(); fetchMappings() })
 
     <!-- Import Dialog -->
     <Dialog v-model:open="showImportModal" @update:open="(value: boolean) => { if (!value) closeImportModal() }">
-      <DialogScrollContent class="w-[calc(100vw-1rem)] max-w-5xl max-h-[85vh] p-4 sm:p-6" @interact-outside="(e: Event) => e.preventDefault()">
+      <DialogScrollContent class="w-[calc(100vw-1rem)] max-w-5xl max-h-[85dvh] overflow-y-auto p-4 sm:p-6" @interact-outside="(e: Event) => e.preventDefault()">
         <DialogHeader>
           <DialogTitle>{{ t('productMappings.importTitle') }}</DialogTitle>
         </DialogHeader>
@@ -1018,6 +1101,31 @@ onMounted(() => { fetchConnections(); fetchCategories(); fetchMappings() })
             </div>
           </div>
 
+          <div v-if="importConnectionId" class="flex items-center gap-2">
+            <Switch id="only-unimported-products" v-model="onlyUnimported" />
+            <Label for="only-unimported-products" class="text-xs font-medium text-muted-foreground cursor-pointer">{{ t('productMappings.import.onlyUnimported') }}</Label>
+          </div>
+
+          <div v-if="importConnectionId" class="flex flex-col gap-3 sm:flex-row">
+            <div class="flex-1">
+              <Label for="upstream-search">{{ t('productMappings.import.searchLabel') }}</Label>
+              <Input id="upstream-search" v-model="upstreamSearch" :placeholder="t('productMappings.import.searchPlaceholder')" class="mt-1" />
+            </div>
+            <div class="sm:w-52">
+              <Label for="upstream-sort">{{ t('productMappings.import.sortLabel') }}</Label>
+              <Select v-model="upstreamSort">
+                <SelectTrigger id="upstream-sort" class="mt-1"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem v-for="option in upstreamSortOptions" :key="option" :value="option">{{ t(`productMappings.import.sort.${option}`) }}</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <p v-if="importConnectionId && (upstreamSearch.trim() || upstreamSort !== 'default')" class="text-xs text-muted-foreground" role="status">
+            {{ t('productMappings.import.searchScope') }}
+            {{ t('productMappings.import.loadedCount', { count: upstreamProducts.length }) }}
+          </p>
+
           <!-- Category options: auto-create + local category selector -->
           <div v-if="importConnectionId" class="flex flex-col gap-4 lg:flex-row lg:items-end">
             <div v-if="importViewMode === 'category' && upstreamCategoriesSupported" class="flex items-center gap-2">
@@ -1044,11 +1152,13 @@ onMounted(() => { fetchConnections(); fetchCategories(); fetchMappings() })
             </div>
           </div>
 
+          <p v-if="upstreamLoadError" role="alert" class="text-sm text-destructive">{{ upstreamLoadError }}</p>
+
           <!-- ===== Category View Mode ===== -->
           <div v-if="importViewMode === 'category' && upstreamCategoriesSupported" class="rounded-lg border border-border overflow-hidden">
             <div v-if="!importConnectionId" class="px-6 py-12 text-center text-sm text-muted-foreground">{{ t('productMappings.import.selectConnectionFirst') }}</div>
             <div v-else-if="loadingUpstream || loadingUpstreamCategories" class="px-6 py-12 text-center text-sm text-muted-foreground">{{ t('productMappings.import.upstreamProductLoading') }}</div>
-            <div v-else-if="categoryDisplayList.length === 0" class="px-6 py-12 text-center text-sm text-muted-foreground">{{ t('productMappings.import.noUpstreamProducts') }}</div>
+            <div v-else-if="categoryDisplayList.length === 0" class="px-6 py-12 text-center text-sm text-muted-foreground">{{ upstreamEmptyMessage }}</div>
             <div v-else class="divide-y divide-border max-h-[55vh] overflow-y-auto">
               <div v-if="loadingCategoryCounts || categoryCountsFailed" class="px-4 py-2 text-xs text-muted-foreground">
                 {{ t(loadingCategoryCounts ? 'productMappings.import.categoryCountsLoading' : 'productMappings.import.categoryCountsFailed') }}
@@ -1073,14 +1183,14 @@ onMounted(() => { fetchConnections(); fetchCategories(); fetchMappings() })
                       size="sm"
                       variant="outline"
                       class="h-7 text-xs"
-                      :disabled="categoryImporting || catItem.nonMappedCount === 0"
+                      :disabled="categoryImporting || catItem.nonMappedCount === 0 || !!upstreamSearch.trim()"
                       @click="handleImportCategory(catItem.category.id)"
                     >{{ t('productMappings.import.importCategory') }}</Button>
                   </div>
                 </div>
 
                 <!-- Expanded product list under this category -->
-                <div v-if="expandedCategoryIds.has(catItem.category.id)">
+                <div v-if="upstreamSearch.trim() || expandedCategoryIds.has(catItem.category.id)">
                   <div
                     v-for="product in (productsByCategory.get(catItem.category.id) || [])"
                     :key="product.id"
@@ -1118,7 +1228,7 @@ onMounted(() => { fetchConnections(); fetchCategories(); fetchMappings() })
                 <button
                   class="inline-flex items-center gap-1.5 rounded-md px-4 py-1.5 text-xs font-medium text-primary hover:bg-primary/5 transition-colors disabled:opacity-50"
                   :disabled="loadingMoreUpstream"
-                  @click="loadMoreUpstreamProducts"
+                  @click="loadMoreUpstreamProducts()"
                 >
                   {{ loadingMoreUpstream ? t('productMappings.import.loadingMore') : t('productMappings.import.loadMore', { remaining: upstreamTotal - upstreamProducts.length }) }}
                 </button>
@@ -1130,14 +1240,14 @@ onMounted(() => { fetchConnections(); fetchCategories(); fetchMappings() })
           <div v-if="importViewMode === 'flat' || !upstreamCategoriesSupported" class="rounded-lg border border-border overflow-hidden">
             <div v-if="!importConnectionId" class="px-6 py-12 text-center text-sm text-muted-foreground">{{ t('productMappings.import.selectConnectionFirst') }}</div>
             <div v-else-if="loadingUpstream" class="px-6 py-12 text-center text-sm text-muted-foreground">{{ t('productMappings.import.upstreamProductLoading') }}</div>
-            <div v-else-if="upstreamProducts.length === 0" class="px-6 py-12 text-center text-sm text-muted-foreground">{{ t('productMappings.import.noUpstreamProducts') }}</div>
+            <div v-else-if="visibleUpstreamProducts.length === 0" class="px-6 py-12 text-center text-sm text-muted-foreground">{{ upstreamEmptyMessage }}</div>
             <div v-else>
               <div class="flex items-center gap-3 border-b border-border bg-muted/40 px-4 py-2.5">
                 <Checkbox :model-value="allSelected ? true : (selectedProductIds.size > 0 ? 'indeterminate' : false)" @update:model-value="toggleSelectAll" />
-                <span class="text-xs font-medium text-muted-foreground">{{ t('productMappings.import.selectAll') }} ({{ upstreamProducts.length }}/{{ upstreamTotal }})</span>
+                <span class="text-xs font-medium text-muted-foreground">{{ t('productMappings.import.selectAll') }} ({{ visibleUpstreamProducts.length }}/{{ upstreamTotal }})</span>
               </div>
               <div class="divide-y divide-border max-h-[50vh] overflow-y-auto">
-                <div v-for="product in upstreamProducts" :key="product.id" class="transition-colors" :class="[selectedProductIds.has(product.id) ? 'bg-primary/5' : '', mappedUpstreamIds.has(product.id) ? 'opacity-50' : '']">
+                <div v-for="product in visibleUpstreamProducts" :key="product.id" class="transition-colors" :class="[selectedProductIds.has(product.id) ? 'bg-primary/5' : '', mappedUpstreamIds.has(product.id) ? 'opacity-50' : '']">
                   <div class="flex items-center gap-3 px-4 py-3" :class="mappedUpstreamIds.has(product.id) ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-muted/20'" @click="toggleProduct(product.id)">
                     <div @click.stop>
                       <Checkbox :model-value="selectedProductIds.has(product.id)" :disabled="mappedUpstreamIds.has(product.id)" @update:model-value="() => toggleProduct(product.id)" />
@@ -1189,17 +1299,14 @@ onMounted(() => { fetchConnections(); fetchCategories(); fetchMappings() })
                     </div>
                   </div>
                 </div>
-                <div v-if="hasMoreUpstream" class="px-4 py-3 text-center border-t border-border/50">
-                  <button
-                    class="inline-flex items-center gap-1.5 rounded-md px-4 py-1.5 text-xs font-medium text-primary hover:bg-primary/5 transition-colors disabled:opacity-50"
-                    :disabled="loadingMoreUpstream"
-                    @click="loadMoreUpstreamProducts"
-                  >
-                    {{ loadingMoreUpstream ? t('productMappings.import.loadingMore') : t('productMappings.import.loadMore', { remaining: upstreamTotal - upstreamProducts.length }) }}
-                  </button>
-                </div>
               </div>
             </div>
+          </div>
+
+          <div v-if="importConnectionId && !loadingUpstream && hasMoreUpstream" class="text-center">
+            <Button variant="outline" size="sm" :disabled="loadingMoreUpstream" @click="loadMoreUpstreamProducts()">
+              {{ loadingMoreUpstream ? t('productMappings.import.loadingMore') : t('productMappings.import.loadMore', { remaining: upstreamTotal - upstreamProducts.length }) }}
+            </Button>
           </div>
 
           <!-- Footer: selected count + action buttons -->
