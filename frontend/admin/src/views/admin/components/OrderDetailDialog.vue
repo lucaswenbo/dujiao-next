@@ -63,6 +63,7 @@ const manualRefundForm = reactive({
   reason: '',
   paymentFeeRefunded: true,
 })
+let manualConfirmGeneration = 0
 const manualConfirmSubmitting = ref(false)
 const manualConfirmError = ref('')
 const manualConfirmSuccess = ref('')
@@ -526,6 +527,7 @@ const resetManualRefundForm = () => {
 }
 
 const resetManualConfirmForm = () => {
+  manualConfirmGeneration++
   manualConfirmForm.providerRef = ''
   manualConfirmForm.remark = ''
   manualConfirmPaymentId.value = null
@@ -538,44 +540,52 @@ const paymentExceptionLabel = (code?: string) => paymentExceptionLabelMap(t, cod
 // 欠付款项已转入用户余额，不能再拿来确认履约（后端同样会拒绝）。
 const isManualConfirmSelectable = (payment: AdminPayment) =>
   payment.exception_code !== 'underpaid_payment_succeeded'
+  && (!selectedOrder.value?.paid_at || payment.manual_fulfillment_held === true)
 
 // 仅未支付的父订单（待支付，或已被超时取消）才允许人工确认支付。
 const canManualConfirmPayment = (order: AdminOrder | null) => {
   if (!order || order.parent_id) return false
-  if (order.paid_at) return false
+  if (order.paid_at) return ['paid', 'fulfilling', 'partially_delivered'].includes(order.status)
+    && order.payments?.some(payment => payment.manual_fulfillment_held) === true
   return order.status === 'pending_payment' || order.status === 'canceled'
 }
 
-const submitManualConfirm = async () => {
-  if (!selectedOrder.value || !canManualConfirmPayment(selectedOrder.value)) return
+const submitManualConfirm = async (holdFulfillment = false) => {
+  const order = selectedOrder.value
+  if (!order || !canManualConfirmPayment(order) || manualConfirmSubmitting.value) return
   manualConfirmError.value = ''
   manualConfirmSuccess.value = ''
-  if (!manualConfirmPaymentId.value) {
+  const paymentId = manualConfirmPaymentId.value
+  if (!paymentId) {
     manualConfirmError.value = t('admin.orders.manualConfirmSelectRequired')
     return
   }
-  const confirmed = await confirmAction({
-    title: t('admin.orders.manualConfirmTitle'),
-    description: t('admin.orders.manualConfirmPrompt'),
-    variant: 'destructive',
-  })
-  if (!confirmed) return
-
+  const generation = manualConfirmGeneration
+  const payload = {
+    payment_id: paymentId,
+    provider_ref: manualConfirmForm.providerRef.trim() || undefined,
+    remark: manualConfirmForm.remark.trim() || undefined,
+    hold_fulfillment: holdFulfillment,
+  }
+  const isCurrent = () => generation === manualConfirmGeneration && selectedOrder.value?.id === order.id
   manualConfirmSubmitting.value = true
   try {
-    await adminAPI.manualConfirmOrderPayment(Number(selectedOrder.value.id), {
-      payment_id: manualConfirmPaymentId.value,
-      provider_ref: manualConfirmForm.providerRef.trim() || undefined,
-      remark: manualConfirmForm.remark.trim() || undefined,
+    const confirmed = await confirmAction({
+      title: t('admin.orders.manualConfirmTitle'),
+      description: t(holdFulfillment ? 'admin.orders.manualConfirmHoldPrompt' : 'admin.orders.manualConfirmPrompt'),
+      variant: 'destructive',
     })
-    manualConfirmSuccess.value = t('admin.orders.manualConfirmSuccess')
+    if (!confirmed || !isCurrent()) return
+    await adminAPI.manualConfirmOrderPayment(Number(order.id), payload)
+    emit('refresh')
+    if (!isCurrent()) return
+    manualConfirmSuccess.value = t(holdFulfillment ? 'admin.orders.manualConfirmHeldSuccess' : 'admin.orders.manualConfirmSuccess')
     manualConfirmForm.providerRef = ''
     manualConfirmForm.remark = ''
     manualConfirmPaymentId.value = null
-    await fetchOrderDetail(Number(selectedOrder.value.id))
-    emit('refresh')
+    await fetchOrderDetail(Number(order.id))
   } catch (err: any) {
-    manualConfirmError.value = err?.message || t('admin.orders.manualConfirmFailed')
+    if (isCurrent()) manualConfirmError.value = err?.message || t('admin.orders.manualConfirmFailed')
   } finally {
     manualConfirmSubmitting.value = false
   }
@@ -1266,6 +1276,7 @@ watch(
                       </span>
                       <span class="font-mono text-foreground">{{ formatMoney(payment.amount, payment.currency) }}</span>
                     </div>
+                    <div v-if="payment.manual_fulfillment_held" class="text-warning">{{ t('admin.orders.manualConfirmHeld') }}</div>
                     <div v-if="payment.exception_code" class="text-warning">
                       {{ paymentExceptionLabel(payment.exception_code) }}
                     </div>
@@ -1278,8 +1289,8 @@ watch(
               <div v-else class="text-xs text-muted-foreground">{{ t('admin.orders.manualConfirmNoPayments') }}</div>
             </div>
             <form
-              class="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]"
-              @submit.prevent="submitManualConfirm"
+              class="grid grid-cols-1 gap-3 lg:grid-cols-2"
+              @submit.prevent="submitManualConfirm()"
             >
               <Input
                 class="min-w-0"
@@ -1295,8 +1306,11 @@ watch(
                 :placeholder="t('admin.orders.manualConfirmRemarkPlaceholder')"
                 :disabled="manualConfirmSubmitting"
               />
+              <Button v-if="!selectedOrder.paid_at" class="w-full md:w-auto" type="button" variant="outline" :disabled="manualConfirmSubmitting || !manualConfirmPaymentId" @click="submitManualConfirm(true)">
+                {{ t('admin.orders.manualConfirmHoldSubmit') }}
+              </Button>
               <Button class="w-full md:w-auto" type="submit" :disabled="manualConfirmSubmitting || !manualConfirmPaymentId">
-                {{ manualConfirmSubmitting ? t('admin.orders.manualConfirmSubmitting') : t('admin.orders.manualConfirmSubmit') }}
+                {{ manualConfirmSubmitting ? t('admin.orders.manualConfirmSubmitting') : t(selectedOrder.paid_at ? 'admin.orders.manualConfirmRelease' : 'admin.orders.manualConfirmSubmit') }}
               </Button>
             </form>
             <div

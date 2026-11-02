@@ -119,8 +119,9 @@ type AdminOrderListItem struct {
 // AdminOrderPaymentItem 管理端订单详情中的支付项
 type AdminOrderPaymentItem struct {
 	paymentdomain.Payment
-	ChannelName        string `json:"channel_name"`
-	DisplayChannelType string `json:"display_channel_type,omitempty"`
+	ChannelName           string `json:"channel_name"`
+	DisplayChannelType    string `json:"display_channel_type,omitempty"`
+	ManualFulfillmentHeld bool   `json:"manual_fulfillment_held"`
 }
 
 // AdminOrderDetail 管理端订单详情返回
@@ -343,9 +344,10 @@ func (h *AdminHandler) AdminGetOrder(c *gin.Context) {
 	paymentItems := make([]AdminOrderPaymentItem, 0, len(payments))
 	for _, payment := range payments {
 		paymentItems = append(paymentItems, AdminOrderPaymentItem{
-			Payment:            payment,
-			ChannelName:        channelNameMap[payment.ChannelID],
-			DisplayChannelType: paymentDisplayChannelType(payment),
+			Payment:               payment,
+			ChannelName:           channelNameMap[payment.ChannelID],
+			DisplayChannelType:    paymentDisplayChannelType(payment),
+			ManualFulfillmentHeld: payment.ProviderPayload["manual_fulfillment_hold"] == true,
 		})
 	}
 

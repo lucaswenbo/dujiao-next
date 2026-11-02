@@ -91,11 +91,12 @@ var (
 
 // ManualConfirmPaymentInput 后台人工确认支付输入。
 type ManualConfirmPaymentInput struct {
-	OrderID     uint
-	PaymentID   uint
-	AdminID     uint
-	ProviderRef string
-	Remark      string
+	OrderID         uint
+	PaymentID       uint
+	AdminID         uint
+	ProviderRef     string
+	Remark          string
+	HoldFulfillment bool
 }
 
 // AdminPaymentConfirmer 后台人工确认支付端口。
@@ -114,9 +115,10 @@ type AdminHandler struct {
 
 // AdminManualConfirmPaymentRequest 人工确认支付请求。
 type AdminManualConfirmPaymentRequest struct {
-	PaymentID   uint   `json:"payment_id" binding:"required,gt=0"`
-	ProviderRef string `json:"provider_ref" binding:"max=255"`
-	Remark      string `json:"remark" binding:"max=500"`
+	PaymentID       uint   `json:"payment_id" binding:"required,gt=0"`
+	ProviderRef     string `json:"provider_ref" binding:"max=255"`
+	Remark          string `json:"remark" binding:"max=500"`
+	HoldFulfillment bool   `json:"hold_fulfillment"`
 }
 
 // AdminManualConfirmPayment 管理员核实到账后人工确认订单支付，并继续正常履约流程。
@@ -136,11 +138,12 @@ func (h *AdminHandler) AdminManualConfirmPayment(c *gin.Context) {
 		return
 	}
 	payment, err := h.confirmer.ManualConfirmPayment(ManualConfirmPaymentInput{
-		OrderID:     orderID,
-		PaymentID:   req.PaymentID,
-		AdminID:     adminID,
-		ProviderRef: req.ProviderRef,
-		Remark:      req.Remark,
+		OrderID:         orderID,
+		PaymentID:       req.PaymentID,
+		AdminID:         adminID,
+		ProviderRef:     req.ProviderRef,
+		Remark:          req.Remark,
+		HoldFulfillment: req.HoldFulfillment,
 	})
 	if err != nil {
 		respondWithMappedError(c, err, adminManualConfirmErrorRules, response.CodeInternal, "error.payment_callback_failed")

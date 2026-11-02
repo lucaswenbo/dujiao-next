@@ -463,6 +463,7 @@ export interface AdminGatewaySecurityTestResult {
 
 // --- Payment ---
 export interface AdminPayment {
+  manual_fulfillment_held?: boolean
   id: number
   payment_no: string
   order_id: number

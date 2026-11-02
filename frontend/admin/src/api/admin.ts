@@ -212,6 +212,7 @@ export interface AdminManualRefundPayload {
 }
 
 export interface AdminManualConfirmPaymentPayload {
+  hold_fulfillment?: boolean
   payment_id: number
   provider_ref?: string
   remark?: string

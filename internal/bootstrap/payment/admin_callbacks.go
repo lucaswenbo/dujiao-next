@@ -53,11 +53,12 @@ type adminPaymentConfirmerAdapter struct {
 
 func (a adminPaymentConfirmerAdapter) ManualConfirmPayment(input paymenttransport.ManualConfirmPaymentInput) (*paymentdomain.Payment, error) {
 	payment, err := a.payments.ManualConfirmPayment(paymentapp.ManualConfirmPaymentInput{
-		OrderID:     input.OrderID,
-		PaymentID:   input.PaymentID,
-		AdminID:     input.AdminID,
-		ProviderRef: input.ProviderRef,
-		Remark:      input.Remark,
+		OrderID:         input.OrderID,
+		PaymentID:       input.PaymentID,
+		AdminID:         input.AdminID,
+		ProviderRef:     input.ProviderRef,
+		Remark:          input.Remark,
+		HoldFulfillment: input.HoldFulfillment,
 	})
 	return payment, mapTransportError(err)
 }

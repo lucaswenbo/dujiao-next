@@ -64,63 +64,22 @@ func (s *PaymentService) enqueueOrderPaidAsync(order *orderdomain.Order, payment
 		}
 	}
 
-	if s.queue == nil || !s.queue.Enabled() {
+	if payment != nil && payment.ProviderPayload["manual_fulfillment_hold"] == true {
 		return
 	}
-	if len(order.Children) > 0 {
-		for _, child := range order.Children {
-			if child.Status == constants.OrderStatusFulfilling && hasManualFulfillmentItems(&child) {
-				s.enqueueManualFulfillmentPendingAsync(&child, order, log)
-			}
-			if shouldAutoFulfill(&child) {
-				if err := s.queue.EnqueueOrderAutoFulfill(child.ID); err != nil {
-					log.Warnw("payment_enqueue_auto_fulfill_failed",
-						"order_id", order.ID,
-						"child_order_id", child.ID,
-						"order_no", order.OrderNo,
-						"error", err,
-					)
-				}
-			}
-		}
-		// 上游采购：为包含上游交付类型的订单创建采购单
-		s.enqueueProcurementAsync(order, log)
-		// B 侧：订单支付成功后检查是否需要回调下游
-		s.enqueueDownstreamCallbackAsync(order, log)
-		return
-	}
-	if order.Status == constants.OrderStatusFulfilling && hasManualFulfillmentItems(order) {
-		s.enqueueManualFulfillmentPendingAsync(order, nil, log)
-	}
-	if shouldAutoFulfill(order) {
-		if err := s.queue.EnqueueOrderAutoFulfill(order.ID); err != nil {
-			log.Warnw("payment_enqueue_auto_fulfill_failed",
-				"order_id", order.ID,
-				"order_no", order.OrderNo,
-				"error", err,
-			)
-		}
-	}
-	// 上游采购：为包含上游交付类型的订单创建采购单
-	s.enqueueProcurementAsync(order, log)
-	// B 侧：订单支付成功后检查是否需要回调下游
-	s.enqueueDownstreamCallbackAsync(order, log)
+	s.enqueueOrderFulfillmentAsync(order, log)
 }
 
-// enqueueProcurementAsync 如果订单包含上游交付类型商品，创建采购单
-func (s *PaymentService) enqueueProcurementAsync(order *orderdomain.Order, log *zap.SugaredLogger) {
+// enqueueProcurementAsync creates or reuses the local order's procurement.
+func (s *PaymentService) enqueueProcurementAsync(order *orderdomain.Order, log *zap.SugaredLogger) error {
 	if s.procurementSvc == nil || order == nil {
-		return
+		return nil
 	}
-	if err := s.procurementSvc.CreateForOrder(order.ID); err != nil {
-		if !errors.Is(err, procurementcontract.ErrExists) {
-			log.Warnw("payment_enqueue_procurement_failed",
-				"order_id", order.ID,
-				"order_no", order.OrderNo,
-				"error", err,
-			)
-		}
+	if err := s.procurementSvc.CreateForOrder(order.ID); err != nil && !errors.Is(err, procurementcontract.ErrExists) {
+		log.Warnw("payment_enqueue_procurement_failed", "order_id", order.ID, "order_no", order.OrderNo, "error", err)
+		return err
 	}
+	return nil
 }
 
 // enqueueDownstreamCallbackAsync B 侧：通知下游 A 站点订单已支付

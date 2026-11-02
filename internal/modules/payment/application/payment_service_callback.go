@@ -39,10 +39,20 @@ type PaymentCallbackInput struct {
 	// manualConfirm 只能由后台"人工确认支付"入口设置，表示管理员已在支付渠道侧核实到账。
 	// 它允许把仍未支付（待支付或已被超时取消）的订单恢复为已支付并继续履约，
 	// 同时保留金额/币种校验，且欠付时直接拒绝而不是悄悄转入余额。
-	manualConfirm bool
+	manualConfirm   bool
+	holdFulfillment bool
 }
 
 func (s *PaymentService) HandleCallback(input PaymentCallbackInput) (*paymentdomain.Payment, error) {
+	if input.Payload != nil {
+		payload := make(jsonmap.JSON, len(input.Payload))
+		for key, value := range input.Payload {
+			if !strings.HasPrefix(key, "manual_fulfillment_") {
+				payload[key] = value
+			}
+		}
+		input.Payload = payload
+	}
 	if input.PaymentID == 0 {
 		return nil, ErrPaymentInvalid
 	}
@@ -105,20 +115,8 @@ func (s *PaymentService) HandleCallback(input PaymentCallbackInput) (*paymentdom
 		return nil, err
 	}
 
-	// 幂等处理：已成功的不再回退状态。
-	// 人工确认需要继续进入事务，由 applyPaymentUpdate 在锁内判断订单是否仍需恢复。
-	if payment.Status == constants.PaymentStatusSuccess && !input.manualConfirm {
-		log.Infow("payment_callback_idempotent_success",
-			"current_status", payment.Status,
-		)
-		return s.updateCallbackMeta(payment, constants.PaymentStatusSuccess, input)
-	}
-	if payment.Status == status && !input.manualConfirm {
-		log.Infow("payment_callback_idempotent_same_status",
-			"current_status", payment.Status,
-		)
-		return s.updateCallbackMeta(payment, status, input)
-	}
+	// Merge duplicate callbacks under the order/payment locks, so an older
+	// callback snapshot cannot overwrite a concurrent fulfillment hold or release.
 
 	previousStatus := payment.Status
 	now := time.Now()
@@ -370,6 +368,12 @@ func (s *PaymentService) applyPaymentUpdate(payment *paymentdomain.Payment, orde
 		}
 		if input.Payload != nil {
 			lockedPayment.ProviderPayload = mergeProviderPayload(lockedPayment.ProviderPayload, input.Payload)
+		}
+		if input.manualConfirm && input.holdFulfillment {
+			if lockedPayment.ProviderPayload == nil {
+				lockedPayment.ProviderPayload = jsonmap.JSON{}
+			}
+			lockedPayment.ProviderPayload["manual_fulfillment_hold"] = true
 		}
 		if err := paymentRepo.Update(lockedPayment); err != nil {
 			return ErrPaymentUpdateFailed

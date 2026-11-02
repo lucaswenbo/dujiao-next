@@ -7,7 +7,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+	"go.uber.org/zap"
+
 	orderapp "github.com/dujiao-next/internal/modules/order/application"
+	orderdomain "github.com/dujiao-next/internal/modules/order/domain"
 	paymentcontract "github.com/dujiao-next/internal/modules/payment/contract"
 
 	paymentdomain "github.com/dujiao-next/internal/modules/payment/domain"
@@ -143,11 +147,12 @@ func mapProviderErrorToService(err error) error {
 
 // ManualConfirmPaymentInput 后台人工确认支付输入。
 type ManualConfirmPaymentInput struct {
-	OrderID     uint
-	PaymentID   uint // 必填：明确要确认的那一条支付记录
-	AdminID     uint
-	ProviderRef string // 第三方支付流水号 / 链上交易 Hash（可选）
-	Remark      string
+	OrderID         uint
+	PaymentID       uint // 必填：明确要确认的那一条支付记录
+	AdminID         uint
+	ProviderRef     string // 第三方支付流水号 / 链上交易 Hash（可选）
+	Remark          string
+	HoldFulfillment bool // Opt in to settlement without automatic delivery/procurement.
 }
 
 // ManualConfirmPayment 管理员在支付渠道侧核实到账后，手动把订单恢复为已支付并继续履约。
@@ -166,14 +171,18 @@ func (s *PaymentService) ManualConfirmPayment(input ManualConfirmPaymentInput) (
 	if order == nil {
 		return nil, orderapp.ErrOrderNotFound
 	}
-	if order.ParentID != nil || order.PaidAt != nil ||
-		(order.Status != constants.OrderStatusPendingPayment && order.Status != constants.OrderStatusCanceled) {
+	if order.ParentID != nil {
 		return nil, orderapp.ErrOrderStatusInvalid
 	}
-
 	payment, err := s.loadManualConfirmPayment(order.ID, input.PaymentID)
 	if err != nil {
 		return nil, err
+	}
+	if order.PaidAt != nil {
+		return s.releaseManualFulfillment(input, order.ID)
+	}
+	if order.Status != constants.OrderStatusPendingPayment && order.Status != constants.OrderStatusCanceled {
+		return nil, orderapp.ErrOrderStatusInvalid
 	}
 
 	ref := strings.TrimSpace(input.ProviderRef)
@@ -193,6 +202,7 @@ func (s *PaymentService) ManualConfirmPayment(input ManualConfirmPaymentInput) (
 		Payload: jsonmap.JSON{
 			"manual_confirm": jsonmap.JSON{
 				"admin_id":                input.AdminID,
+				"hold_fulfillment":        input.HoldFulfillment,
 				"remark":                  strings.TrimSpace(input.Remark),
 				"provider_ref":            ref,
 				"previous_order_status":   order.Status,
@@ -200,7 +210,8 @@ func (s *PaymentService) ManualConfirmPayment(input ManualConfirmPaymentInput) (
 				"confirmed_at":            now.Format(time.RFC3339),
 			},
 		},
-		manualConfirm: true,
+		manualConfirm:   true,
+		holdFulfillment: input.HoldFulfillment,
 	})
 }
 
@@ -221,4 +232,136 @@ func (s *PaymentService) loadManualConfirmPayment(orderID, paymentID uint) (*pay
 		return nil, ErrPaymentUnderpaidCredited
 	}
 	return payment, nil
+}
+
+// releaseManualFulfillment is only available for this feature's held receipts.
+// It does not replay settlement, affiliate credit, or membership accounting.
+func (s *PaymentService) releaseManualFulfillment(input ManualConfirmPaymentInput, orderID uint) (*paymentdomain.Payment, error) {
+	var result *paymentdomain.Payment
+	var dispatch bool
+	dispatchToken := uuid.NewString()
+	err := s.paymentRepo.WithinTransaction(func(tx paymentcontract.Transaction) error {
+		order, err := tx.Orders().GetByIDForUpdateWithChildren(orderID)
+		if err != nil {
+			return err
+		}
+		if order == nil {
+			return orderapp.ErrOrderNotFound
+		}
+		p, err := tx.Payments().GetByIDForUpdate(input.PaymentID)
+		if err != nil {
+			return err
+		}
+		if p == nil || p.OrderID != orderID {
+			return ErrPaymentNotFound
+		}
+		result = p
+		held, _ := p.ProviderPayload["manual_fulfillment_hold"].(bool)
+		if !held {
+			if p.ProviderPayload["manual_fulfillment_released"] == true && !input.HoldFulfillment {
+				return nil
+			}
+			return orderapp.ErrOrderStatusInvalid
+		}
+		if input.HoldFulfillment {
+			return nil
+		}
+		// Keep the hold until dispatch is acknowledged. A bounded lease blocks
+		// concurrent clicks and expires after a process crash, allowing retry.
+		if until, ok := p.ProviderPayload["manual_fulfillment_dispatch_until"].(string); ok {
+			if deadline, err := time.Parse(time.RFC3339Nano, until); err == nil && deadline.After(time.Now()) {
+				return ErrPaymentUpdateFailed
+			}
+		}
+		if p.Status != constants.PaymentStatusSuccess || order.PaidAt == nil || (order.Status != constants.OrderStatusPaid && order.Status != constants.OrderStatusFulfilling && order.Status != constants.OrderStatusPartiallyDelivered) || order.RefundedAmount.IsPositive() {
+			return orderapp.ErrOrderStatusInvalid
+		}
+		for _, child := range order.Children {
+			if child.RefundedAmount.IsPositive() || (child.Status != constants.OrderStatusPaid && child.Status != constants.OrderStatusFulfilling && child.Status != constants.OrderStatusDelivered && child.Status != constants.OrderStatusCompleted) {
+				return orderapp.ErrOrderStatusInvalid
+			}
+		}
+		p.ProviderPayload = mergeProviderPayload(p.ProviderPayload, jsonmap.JSON{
+			"manual_fulfillment_dispatch_token": dispatchToken,
+			"manual_fulfillment_dispatch_until": time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano),
+			"admin_fulfillment_release":         map[string]interface{}{"admin_id": input.AdminID, "receipt": strings.TrimSpace(input.ProviderRef), "remark": strings.TrimSpace(input.Remark), "requested_at": time.Now().UTC().Format(time.RFC3339Nano)},
+		})
+		if err := tx.Payments().Update(p); err != nil {
+			return err
+		}
+		dispatch = true
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !dispatch {
+		return result, nil
+	}
+	order, dispatchErr := s.orderRepo.GetByID(orderID)
+	if dispatchErr == nil {
+		dispatchErr = s.enqueueOrderFulfillmentAsync(order, paymentLogger("payment_id", input.PaymentID, "admin_id", input.AdminID))
+	}
+	// Finalize under the same locks. Failure preserves the receipt and the hold,
+	// so another attempt reuses existing procurement instead of reconciling twice.
+	err = s.paymentRepo.WithinTransaction(func(tx paymentcontract.Transaction) error {
+		if _, err := tx.Orders().GetByIDForUpdateWithChildren(orderID); err != nil {
+			return err
+		}
+		p, err := tx.Payments().GetByIDForUpdate(input.PaymentID)
+		if err != nil {
+			return err
+		}
+		if p == nil || p.OrderID != orderID {
+			return ErrPaymentNotFound
+		}
+		if p.ProviderPayload["manual_fulfillment_dispatch_token"] != dispatchToken {
+			return ErrPaymentUpdateFailed
+		}
+		p.ProviderPayload = mergeProviderPayload(p.ProviderPayload, jsonmap.JSON{
+			"manual_fulfillment_hold": dispatchErr != nil, "manual_fulfillment_released": dispatchErr == nil, "manual_fulfillment_dispatch_until": "", "manual_fulfillment_dispatch_token": "",
+		})
+		result = p
+		return tx.Payments().Update(p)
+	})
+	if err != nil {
+		return nil, err
+	}
+	if dispatchErr != nil {
+		return nil, ErrPaymentUpdateFailed
+	}
+	return result, nil
+}
+
+// enqueueOrderFulfillmentAsync reports enqueue failures to administrative callers.
+// Normal provider callbacks retain their existing settlement/retry behavior.
+func (s *PaymentService) enqueueOrderFulfillmentAsync(order *orderdomain.Order, log *zap.SugaredLogger) error {
+	if order == nil {
+		return nil
+	}
+	if s.queue == nil || !s.queue.Enabled() {
+		return ErrPaymentUpdateFailed
+	}
+	var failures []error
+	targets := order.Children
+	if len(targets) == 0 {
+		targets = []orderdomain.Order{*order}
+	}
+	for i := range targets {
+		child := &targets[i]
+		if child.Status == constants.OrderStatusFulfilling && hasManualFulfillmentItems(child) {
+			s.enqueueManualFulfillmentPendingAsync(child, order, log)
+		}
+		if shouldAutoFulfill(child) {
+			if err := s.queue.EnqueueOrderAutoFulfill(child.ID); err != nil {
+				log.Warnw("payment_enqueue_auto_fulfill_failed", "order_id", order.ID, "child_order_id", child.ID, "error", err)
+				failures = append(failures, err)
+			}
+		}
+	}
+	if err := s.enqueueProcurementAsync(order, log); err != nil {
+		failures = append(failures, err)
+	}
+	s.enqueueDownstreamCallbackAsync(order, log)
+	return errors.Join(failures...)
 }
