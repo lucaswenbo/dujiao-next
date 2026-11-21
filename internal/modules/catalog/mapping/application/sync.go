@@ -208,6 +208,7 @@ func (s *Service) SyncProduct(mappingID uint) error {
 	if upFulfillment != constants.FulfillmentTypeAuto {
 		upFulfillment = constants.FulfillmentTypeManual
 	}
+	s.observeUpstreamMetadata(mapping, upProduct)
 	mapping.UpstreamFulfillmentType = upFulfillment
 	mapping.UpstreamStatus = mappingdomain.UpstreamStatusActive
 	mapping.LastSyncedAt = &now
@@ -758,6 +759,7 @@ func (s *Service) syncProductFromData(mapping *mappingdomain.Mapping, conn *site
 	if upFulfillment != constants.FulfillmentTypeAuto {
 		upFulfillment = constants.FulfillmentTypeManual
 	}
+	s.observeUpstreamMetadata(mapping, upProduct)
 	mapping.UpstreamFulfillmentType = upFulfillment
 	mapping.UpstreamStatus = mappingdomain.UpstreamStatusActive
 	mapping.LastSyncedAt = now
