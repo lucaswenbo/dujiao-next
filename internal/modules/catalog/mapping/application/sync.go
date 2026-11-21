@@ -28,6 +28,11 @@ import (
 
 // SyncProduct 同步单个映射商品的上游数据（全量同步）
 func (s *Service) SyncProduct(mappingID uint) error {
+	return s.syncProduct(mappingID, true)
+}
+
+// syncProduct 在用户下单兜底校验时可跳过通知队列，避免增加结账路径的耗时。
+func (s *Service) syncProduct(mappingID uint, notifyMetadata bool) error {
 	mapping, err := s.mappings.GetByID(mappingID)
 	if err != nil {
 		return err
@@ -208,7 +213,9 @@ func (s *Service) SyncProduct(mappingID uint) error {
 	if upFulfillment != constants.FulfillmentTypeAuto {
 		upFulfillment = constants.FulfillmentTypeManual
 	}
-	s.observeUpstreamMetadata(mapping, upProduct)
+	if notifyMetadata {
+		s.observeUpstreamMetadata(mapping, upProduct)
+	}
 	mapping.UpstreamFulfillmentType = upFulfillment
 	mapping.UpstreamStatus = mappingdomain.UpstreamStatusActive
 	mapping.LastSyncedAt = &now
@@ -397,7 +404,7 @@ func (s *Service) EnsureUpstreamStockForOrder(localSKUID uint, requiredQty int) 
 	}
 
 	// 缓存库存不足 → 实时同步上游商品
-	if syncErr := s.SyncProduct(skuMapping.ProductMappingID); syncErr != nil {
+	if syncErr := s.syncProduct(skuMapping.ProductMappingID, false); syncErr != nil {
 		// 上游抖动：fail-open，记录但不阻断下单
 		logger.Warnw("preorder_stock_check_realtime_sync_failed",
 			"local_sku_id", localSKUID,
