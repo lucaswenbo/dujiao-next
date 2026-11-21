@@ -81,6 +81,7 @@ func (c *Container) initIntegrationServices() {
 	c.ProductMappingService = productMappingService
 	c.ProductMappingService.SetCategoryCreator(c.CategoryService)
 	c.ProductMappingService.SetSettings(c.SettingService)
+	c.ProductMappingService.SetNotificationEnqueuer(c.NotificationService)
 	c.SiteConnectionService.SetMarkupReapplier(c.ProductMappingService)
 	c.OrderService.SetProductMappingService(c.ProductMappingService)
 	var downstreamQueue downstreamcallbackcontract.CallbackQueue
