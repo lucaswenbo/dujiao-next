@@ -265,6 +265,7 @@ func (s *Service) importUpstreamProduct(connectionID uint, upstreamProductID uin
 			ConnectionID:            connectionID,
 			LocalProductID:          product.ID,
 			UpstreamProductID:       upstreamProductID,
+			UpstreamMetadataJSON:    initialUpstreamMetadataSnapshot(upProduct),
 			UpstreamFulfillmentType: upstreamFulfillmentType,
 			IsActive:                true,
 			LastSyncedAt:            &now,
