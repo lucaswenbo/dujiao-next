@@ -147,6 +147,19 @@ func (s *Service) dispatchSingleEvent(ctx context.Context, setting settingsmessa
 	if strings.TrimSpace(title) == "" {
 		title = "Notification"
 	}
+	// Give upstream metadata alerts a recognizable email subject in the owner's inbox.
+	// This uses the existing exception_alert scene, recipients and delivery logs.
+	if payload.EventType == constants.NotificationEventExceptionAlert && payload.BizType == "upstream_product_metadata" {
+		if productTitle, ok := payload.Data["product_title"].(string); ok && strings.TrimSpace(productTitle) != "" {
+			runes := []rune(strings.TrimSpace(productTitle))
+			if len(runes) > 70 {
+				runes = runes[:70]
+			}
+			title = "【上游商品信息变更】" + string(runes)
+		} else {
+			title = "【上游商品信息变更】请及时核查"
+		}
+	}
 
 	var firstErr error
 	if setting.Channels.Email.Enabled && len(setting.Channels.Email.Recipients) > 0 {
