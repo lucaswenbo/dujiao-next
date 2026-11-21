@@ -6,6 +6,7 @@ import (
 	"github.com/dujiao-next/internal/constants"
 	mappingcontract "github.com/dujiao-next/internal/modules/catalog/mapping/contract"
 	mappingdomain "github.com/dujiao-next/internal/modules/catalog/mapping/domain"
+	notificationcontract "github.com/dujiao-next/internal/modules/notification/contract"
 )
 
 // 文件组织约定:
@@ -39,6 +40,7 @@ type Service struct {
 	transactions    mappingcontract.UnitOfWork
 	categoryCreator mappingcontract.CategoryCreator
 	settings        mappingcontract.SettingsProvider
+	notification    notificationcontract.NotificationEnqueuer
 }
 
 func NewService(options Options) (*Service, error) {
@@ -65,6 +67,11 @@ func (s *Service) SetCategoryCreator(creator mappingcontract.CategoryCreator) {
 // SetSettings 注入设置端口（用于读取上游同步动态配置）。
 func (s *Service) SetSettings(settings mappingcontract.SettingsProvider) {
 	s.settings = settings
+}
+
+// SetNotificationEnqueuer 注入已有通知中心队列（仅供上游元数据变化提醒使用）。
+func (s *Service) SetNotificationEnqueuer(notifier notificationcontract.NotificationEnqueuer) {
+	s.notification = notifier
 }
 
 // GetByID 获取映射详情
