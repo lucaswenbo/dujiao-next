@@ -167,12 +167,21 @@ func (s *Service) observeUpstreamMetadata(mapping *mappingdomain.Mapping, produc
 	if title == "" {
 		title = fmt.Sprintf("商品 #%d", mapping.LocalProductID)
 	}
+	// Include full-value hashes to distinguish changes beyond the short email excerpts.
+	// Otherwise two different long descriptions might share the same dedupe key.
+	var fingerprint strings.Builder
+	for _, change := range changes {
+		fingerprint.WriteString(change.Field + ":" + change.Locale + ":")
+		fingerprint.WriteString(fmt.Sprint(next[change.Field+":"+change.Locale+":hash"]))
+		fingerprint.WriteString(";")
+	}
 	err := s.notification.Enqueue(notificationcontract.EnqueueInput{
 		EventType: constants.NotificationEventExceptionAlert,
 		BizType:   upstreamMetadataBizType,
 		BizID:     mapping.LocalProductID,
 		Data: jsonmap.JSON{
 			"product_title":          title,
+			"change_fingerprint":     metadataDigest(fingerprint.String()),
 			"alert_type":             "上游商品信息变更",
 			"alert_level":            "warning",
 			"alert_value":            fmt.Sprintf("%d 项", len(changes)),
