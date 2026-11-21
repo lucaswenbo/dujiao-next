@@ -6,6 +6,7 @@ import (
 	productdomain "github.com/dujiao-next/internal/modules/catalog/product/domain"
 	siteconnectiondomain "github.com/dujiao-next/internal/modules/siteconnection/domain"
 	"github.com/dujiao-next/internal/shared/money"
+	"github.com/dujiao-next/internal/shared/jsonmap"
 )
 
 // 上游商品状态枚举（Mapping.UpstreamStatus）
@@ -25,6 +26,7 @@ type Mapping struct {
 	UpstreamStatus          string     `gorm:"type:varchar(16);not null;default:'active';index" json:"upstream_status"`     // 上游商品状态：active/inactive/deleted
 	IsActive                bool       `gorm:"not null;default:true" json:"is_active"`
 	LastSyncedAt            *time.Time `json:"last_synced_at,omitempty"`
+	UpstreamMetadataJSON    jsonmap.JSON `gorm:"type:json" json:"-"` // 只保存上游多语言字段的摘要和哈希，不覆盖本地内容
 	CreatedAt               time.Time  `gorm:"index" json:"created_at"`
 	UpdatedAt               time.Time  `gorm:"index" json:"updated_at"`
 	DeletedAt               *time.Time `gorm:"index" json:"-"`
